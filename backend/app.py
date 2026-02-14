@@ -3,6 +3,7 @@
 import os
 import json
 import uuid
+import time
 import sqlite3
 from datetime import datetime
 from contextlib import asynccontextmanager
@@ -11,8 +12,12 @@ from dotenv import load_dotenv
 load_dotenv(os.path.join(os.path.dirname(__file__), "..", ".env"))
 
 import google.generativeai as genai
+from pathlib import Path
+
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 # ---------------------------------------------------------------------------
@@ -22,7 +27,7 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 if GEMINI_API_KEY:
     genai.configure(api_key=GEMINI_API_KEY)
 
-DB_PATH = os.getenv("DB_PATH", "sessions.db")
+DB_PATH = os.getenv("DB_PATH", os.path.join(os.path.dirname(__file__), "sessions.db"))
 
 # ---------------------------------------------------------------------------
 # DB helpers
@@ -107,12 +112,22 @@ class SimRequest(BaseModel):
 # Gemini helper
 # ---------------------------------------------------------------------------
 
-def _gemini(prompt: str) -> str:
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-1.5-flash")
+
+def _gemini(prompt: str, retries: int = 3) -> str:
     if not GEMINI_API_KEY:
         raise HTTPException(503, "GEMINI_API_KEY not set")
-    model = genai.GenerativeModel("gemini-2.0-flash")
-    resp = model.generate_content(prompt)
-    return resp.text
+    model = genai.GenerativeModel(GEMINI_MODEL)
+    for attempt in range(retries):
+        try:
+            resp = model.generate_content(prompt)
+            return resp.text
+        except Exception as e:
+            err_str = str(e).lower()
+            if attempt < retries - 1 and ("429" in err_str or "quota" in err_str):
+                time.sleep(15 * (attempt + 1))
+            else:
+                raise HTTPException(502, f"Gemini API error: {e}")
 
 # ---------------------------------------------------------------------------
 # Routes
@@ -267,3 +282,17 @@ Only return valid JSON, no markdown."""
 @app.get("/health")
 def health():
     return {"status": "ok", "ts": datetime.utcnow().isoformat()}
+
+# ---------------------------------------------------------------------------
+# Serve frontend static files (production)
+# ---------------------------------------------------------------------------
+STATIC_DIR = Path(__file__).resolve().parent.parent / "frontend" / "dist"
+if STATIC_DIR.is_dir():
+    app.mount("/assets", StaticFiles(directory=STATIC_DIR / "assets"), name="assets")
+
+    @app.get("/{full_path:path}")
+    def serve_spa(full_path: str):
+        file = STATIC_DIR / full_path
+        if file.is_file():
+            return FileResponse(file)
+        return FileResponse(STATIC_DIR / "index.html")
