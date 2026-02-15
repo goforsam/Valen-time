@@ -112,22 +112,36 @@ class SimRequest(BaseModel):
 # Gemini helper
 # ---------------------------------------------------------------------------
 
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-1.5-flash")
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash-lite")
 
 def _gemini(prompt: str, retries: int = 3) -> str:
     if not GEMINI_API_KEY:
         raise HTTPException(503, "GEMINI_API_KEY not set")
     model = genai.GenerativeModel(GEMINI_MODEL)
+    last_err = None
     for attempt in range(retries):
         try:
             resp = model.generate_content(prompt)
             return resp.text
         except Exception as e:
+            last_err = e
+            print(f"[Gemini] Attempt {attempt+1}/{retries} failed: {e}")
             err_str = str(e).lower()
             if attempt < retries - 1 and ("429" in err_str or "quota" in err_str):
                 time.sleep(15 * (attempt + 1))
-            else:
-                raise HTTPException(502, f"Gemini API error: {e}")
+                continue
+            raise HTTPException(502, f"Gemini API error: {e}")
+    raise HTTPException(502, f"Gemini API error after {retries} retries: {last_err}")
+
+
+def _parse_json(raw: str):
+    """Strip markdown fences and parse JSON from Gemini response."""
+    text = raw.strip()
+    if text.startswith("```"):
+        text = text.split("\n", 1)[1] if "\n" in text else text[3:]
+    if text.endswith("```"):
+        text = text[:-3].strip()
+    return json.loads(text)
 
 # ---------------------------------------------------------------------------
 # Routes
@@ -198,7 +212,7 @@ Only return valid JSON, no markdown."""
     conn.close()
 
     try:
-        analysis = json.loads(raw)
+        analysis = _parse_json(raw)
     except json.JSONDecodeError:
         analysis = {"raw": raw}
 
@@ -228,7 +242,7 @@ Only return valid JSON, no markdown."""
 
     raw = _gemini(prompt)
     try:
-        plan = json.loads(raw)
+        plan = _parse_json(raw)
     except json.JSONDecodeError:
         plan = {"raw": raw}
 
@@ -266,7 +280,7 @@ Only return valid JSON, no markdown."""
 
     raw = _gemini(prompt)
     try:
-        sim = json.loads(raw)
+        sim = _parse_json(raw)
     except json.JSONDecodeError:
         sim = {"raw": raw}
 
